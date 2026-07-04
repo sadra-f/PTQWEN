@@ -343,6 +343,12 @@ class Qwen2PreTrainedModel(PreTrainedModel):
 @auto_docstring
 class Qwen2Model(Qwen2PreTrainedModel):
     def __init__(self, config: Qwen2Config, pt_ids_sorted):
+        """_summary_
+
+        Args:
+            config (Qwen2Config): _description_
+            pt_ids_sorted (_type_): _description_
+        """
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
