@@ -84,9 +84,9 @@ def main():
 
             # First token that belongs to the answer
             answer_start = (labels != -100).nonzero(as_tuple=True)[0][0]
-            question = test_raw[i]["messages"][0]["content"]
+            question = test_raw['train'][i]["messages"][0]["content"]
             prompt_ids = input_ids[:answer_start]
-            expected = test_raw[i]["messages"][1]["content"]
+            expected = test_raw['train'][i]["messages"][1]["content"]
 
             outputs = model.generate(
                 input_ids=prompt_ids.unsqueeze(0).to(device),
