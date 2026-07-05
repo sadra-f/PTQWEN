@@ -162,6 +162,7 @@ def eager_attention_forward(
     scaling: float,
     # ================================================================ #
     pt_manager:ManagePT,
+    calc_pt_bias:bool,
     # ================================================================ #
     dropout: float = 0.0,
     **kwargs: Unpack[TransformersKwargs],
@@ -175,8 +176,9 @@ def eager_attention_forward(
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     # ================================================================ #
-    pointer_bias = pt_manager.calculate_bias(attn_weights).to(attn_weights.device)
-    attn_weights = attn_weights + pointer_bias
+    if calc_pt_bias:
+        pointer_bias = pt_manager.calculate_bias(attn_weights).to(attn_weights.device)
+        attn_weights = attn_weights + pointer_bias
     # ================================================================ #
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -206,6 +208,7 @@ class Qwen2Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
         # ================================================================ #
+        self.calc_pt_bias = any([p.requires_grad for p in self.parameters()])
         self.pt_manager_ref = pt_manager
         # ================================================================ #
 
@@ -245,6 +248,7 @@ class Qwen2Attention(nn.Module):
             sliding_window=self.sliding_window,  # main diff with Llama
             # ================================================================ #
             pt_manager=self.pt_manager_ref,
+            calc_pt_bias=self.calc_pt_bias,
             # ================================================================ #
             **kwargs,
         )
@@ -252,6 +256,9 @@ class Qwen2Attention(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
+    
+    def check_calc_pt_bias(self):
+        self.calc_pt_bias = any([p.requires_grad for p in self.parameters()])
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -365,7 +372,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.rotary_emb = Qwen2RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
-
+        # ================================================================ #
+        self.set_freeze_half_status(False)
+        # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -441,6 +450,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
             past_key_values=past_key_values if use_cache else None,
         )
 
+    def set_freeze_half_status(self, set_to=False):
+        for i, l in enumerate(self.layers):
+            if i % 2 == 0:
+                for p in l.parameters():
+                    p.requires_grad = set_to
+                l.self_attn.check_calc_pt_bias()
 
 @auto_docstring
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):

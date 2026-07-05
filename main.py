@@ -26,8 +26,11 @@ def main():
     test_ds = preprocess_file("Dataset/test.jsonl", tokenizer)
 
     model = Qwen2ForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B", sorted(all_pt_ids), attn_implementation="eager", cache_dir="model_cache/")
+
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
+    model.model.set_freeze_half_status(False)
+    model.generate(torch.tensor(tokenizer.encode("Hello ol freind!")).unsqueeze(0))
 
     args = TrainingArguments(
         output_dir="./checkpoints",
