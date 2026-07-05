@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer
 from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
-import torch
+import torch, json
 
 
 
@@ -23,7 +23,7 @@ def main():
 
     train_ds = preprocess_file("Dataset/train.jsonl", tokenizer)
     validate_ds = preprocess_file("Dataset/validate.jsonl", tokenizer)
-    test_ds = preprocess_file("Dataset/test.jsonl", tokenizer)
+    test_ds, test_raw = preprocess_file("Dataset/test.jsonl", tokenizer, True)
 
     model = Qwen2ForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B", sorted(all_pt_ids), attn_implementation="eager", cache_dir="model_cache/")
 
@@ -61,7 +61,47 @@ def main():
         eval_dataset=validate_ds
     )
     print(f"{'='*50}\nStart training...\n{'='*50}")
-    trainer.train()
+    train_result = trainer.train()
+    trainer.save_state()
+    trainer.save_model("./final_model")
+    tokenizer.save_pretrained("./final_model")
+    test_results = trainer.evaluate(test_ds)
+    print(test_results)
+
+
+    with open("test_results.json", "w") as f:
+        json.dump(test_results, f, indent=4)
+    trainer.save_metrics("train", train_result.metrics)
+    trainer.save_metrics("eval", trainer.evaluate(validate_ds))
+    trainer.save_metrics("test", trainer.evaluate(test_ds))
+    all_qualitative = []
+    model.eval()
+    with torch.no_grad():
+        for i, inst in enumerate(test_ds):
+            input_ids = inst["input_ids"]
+            labels = inst["labels"]
+            attention_mask = inst["attention_mask"]
+
+            # First token that belongs to the answer
+            answer_start = (labels != -100).nonzero(as_tuple=True)[0][0]
+            question = test_raw[i]["messages"][0]["content"]
+            prompt_ids = input_ids[:answer_start]
+            expected = test_raw[i]["messages"][1]["content"]
+
+            outputs = model.generate(
+                input_ids=prompt_ids.unsqueeze(0).to(device),
+                attention_mask=torch.ones_like(prompt_ids).unsqueeze(0).to(device),
+                max_new_tokens=128,
+                do_sample=False,
+            )
+            generated = tokenizer.decode(
+                outputs[0][len(prompt_ids):],
+                skip_special_tokens=False,
+            )
+            all_qualitative.append({"question":question, "expected":expected, "generated":generated})
+    with open("qualitative_test.json", 'w', encoding="utf-8") as f:
+        json.dump(all_qualitative, f)
+        
 
 if __name__ == "__main__":
     # freeze_support()   # optional unless freezing to exe, but harmless

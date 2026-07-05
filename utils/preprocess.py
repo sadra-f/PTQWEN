@@ -23,11 +23,12 @@ def generate_loss_labels(batched_inp_ids:torch.Tensor, im_start_id, assistant_id
             labels[bi, second_eos_index:] = -100
     return labels
 
-def preprocess_file(path, tokenizer):
+def preprocess_file(path, tokenizer, return_raw=False):
     ds = load_dataset("json", data_files=path)
 
     tokenized_inps = tokenizer.apply_chat_template(ds['train'][:]['messages'], tokenize=True,  padding=True, max_length=1024)
     labels = generate_loss_labels(torch.tensor(tokenized_inps['input_ids']), tokenizer.convert_tokens_to_ids("<|im_start|>"), tokenizer.convert_tokens_to_ids("assistant"), tokenizer.pad_token_id)
     dataset = {"input_ids": torch.tensor(tokenized_inps['input_ids']), "attention_mask":torch.tensor(tokenized_inps['attention_mask']),"labels": labels}
-    
+    if return_raw:
+        return MyDataset(dataset), ds
     return MyDataset(dataset)
