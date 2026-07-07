@@ -1,6 +1,7 @@
-from transformers import AutoTokenizer, TrainingArguments, Trainer
+from transformers import AutoTokenizer, TrainingArguments
 from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
+from utils.MTrainer import MTrainer
 import torch, json
 
 
@@ -30,7 +31,6 @@ def main():
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
     model.model.set_freeze_half_status(False)
-    model.generate(torch.tensor(tokenizer.encode("Hello ol freind!")).unsqueeze(0))
 
     args = TrainingArguments(
         output_dir="./checkpoints",
@@ -54,11 +54,13 @@ def main():
         seed=24,
     )
 
-    trainer = Trainer(
+    trainer = MTrainer(
         model=model,
         args=args,
         train_dataset=train_ds,
-        eval_dataset=validate_ds
+        eval_dataset=validate_ds,
+        weighted_token_ids=all_pt_ids,
+        token_weight=2
     )
     print(f"{'='*50}\nStart training...\n{'='*50}")
     train_result = trainer.train()
