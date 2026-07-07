@@ -3,7 +3,7 @@ from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
 from utils.MTrainer import MTrainer
 import torch, json
-
+from transformers import EarlyStoppingCallback
 
 
 
@@ -37,8 +37,8 @@ def main():
         weight_decay=0.01,
         lr_scheduler_type="cosine",
         warmup_ratio = 0.03,
-        num_train_epochs=5,
-        per_device_train_batch_size=1,
+        num_train_epochs=20,
+        per_device_train_batch_size=2,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
@@ -49,6 +49,7 @@ def main():
         save_steps=500,
         save_total_limit=3,
         logging_steps=10,
+        metric_for_best_model="eval_loss",
         remove_unused_columns=False,
         dataloader_num_workers=4,
         seed=24,
@@ -59,11 +60,14 @@ def main():
         args=args,
         train_dataset=train_ds,
         eval_dataset=validate_ds,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=7)],
         weighted_token_ids=all_pt_ids,
         token_weight=2
     )
+    
     print(f"{'='*50}\nStart training...\n{'='*50}")
     train_result = trainer.train()
+#    trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-20000")
     trainer.save_state()
     trainer.save_model("./final_model")
     tokenizer.save_pretrained("./final_model")
