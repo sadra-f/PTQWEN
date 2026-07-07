@@ -49,7 +49,7 @@ def main():
         save_steps=500,
         save_total_limit=3,
         logging_steps=10,
-        metric_for_best_model="eval_loss",
+        # metric_for_best_model="eval_loss",
         remove_unused_columns=False,
         dataloader_num_workers=4,
         seed=24,
@@ -60,7 +60,7 @@ def main():
         args=args,
         train_dataset=train_ds,
         eval_dataset=validate_ds,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=7)],
+        # callbacks=[EarlyStoppingCallback(early_stopping_patience=7)],
         weighted_token_ids=all_pt_ids,
         token_weight=2
     )
