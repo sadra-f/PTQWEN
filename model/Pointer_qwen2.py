@@ -372,9 +372,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.rotary_emb = Qwen2RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
-        # ================================================================ #
-        self.set_freeze_half_status(False)
-        # ================================================================ #
+        # # ================================================================ #
+        # self.set_freeze_half_status(False)
+        # # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
 
