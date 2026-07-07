@@ -30,7 +30,7 @@ def main():
 
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
-    model.model.set_freeze_half_status(False)
+    model.model.set_req_grad_half(False)
 
     args = TrainingArguments(
         output_dir="./checkpoints",

@@ -450,7 +450,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             past_key_values=past_key_values if use_cache else None,
         )
 
-    def set_freeze_half_status(self, set_to=False):
+    def set_req_grad_half(self, set_to=False):
         for i, l in enumerate(self.layers):
             if i % 2 == 0:
                 for p in l.parameters():
