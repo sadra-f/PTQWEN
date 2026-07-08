@@ -20,10 +20,10 @@ class MTrainer(Trainer):
         print(outputs.loss.item())
         logits = outputs.logits
 
-        vocab_size = logits.size(-1)
-
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
+
+        vocab_size = shift_logits.size(-1)
 
         losses = F.cross_entropy(
             shift_logits.view(-1, vocab_size),
@@ -32,18 +32,18 @@ class MTrainer(Trainer):
             ignore_index=-100,
         )
 
-        # flat_labels = labels.view(-1)
+        flat_labels = shift_labels.view(-1)
 
         weights = torch.ones_like(losses)
 
-        mask = torch.zeros_like(shift_labels, dtype=torch.bool)
+        mask = torch.zeros_like(flat_labels, dtype=torch.bool)
 
         for token_id in self.weighted_token_ids:
-            mask |= (shift_labels == token_id)
+            mask |= (flat_labels == token_id)
 
         weights[mask] = self.token_weight
 
-        valid = shift_labels != -100
+        valid = flat_labels != -100
 
         loss = (losses * weights)[valid].sum() / weights[valid].sum()
 
