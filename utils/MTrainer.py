@@ -16,6 +16,7 @@ class MTrainer(Trainer):
         labels = inputs["labels"]
 
         outputs = model(**inputs)
+        print(f"\n{'='*50}\ncustom test{'='*50}\n")
         print(outputs.loss.item())
         logits = outputs.logits
 
@@ -53,5 +54,6 @@ class MTrainer(Trainer):
         )
 
         print(my_loss.item())
+        print(f"{'='*50}\n")
 
         return (loss, outputs) if return_outputs else loss
