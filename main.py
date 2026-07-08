@@ -39,7 +39,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio = 0.03,
         num_train_epochs=7,
-        per_device_train_batch_size=3,
+        per_device_train_batch_size=2,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
