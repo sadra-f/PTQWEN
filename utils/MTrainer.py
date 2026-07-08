@@ -22,9 +22,12 @@ class MTrainer(Trainer):
 
         vocab_size = logits.size(-1)
 
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
         losses = F.cross_entropy(
-            logits.view(-1, vocab_size),
-            labels.view(-1),
+            shift_logits.view(-1, vocab_size),
+            shift_labels.view(-1),
             reduction="none",
             ignore_index=-100,
         )
