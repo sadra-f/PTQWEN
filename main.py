@@ -2,6 +2,7 @@ from transformers import AutoTokenizer, TrainingArguments
 from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
 from utils.MTrainer import MTrainer
+from utils.Testcallback import TestCallback
 import torch, json
 from transformers import EarlyStoppingCallback
 
@@ -60,7 +61,10 @@ def main():
         args=args,
         train_dataset=train_ds,
         eval_dataset=validate_ds,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=3),
+            TestCallback(test_ds, test_raw, tokenizer),
+        ],
         weighted_token_ids=all_pt_ids,
         token_weight=1.15
     )
