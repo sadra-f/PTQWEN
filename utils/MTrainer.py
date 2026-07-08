@@ -32,18 +32,18 @@ class MTrainer(Trainer):
             ignore_index=-100,
         )
 
-        flat_labels = labels.view(-1)
+        # flat_labels = labels.view(-1)
 
         weights = torch.ones_like(losses)
 
-        mask = torch.zeros_like(flat_labels, dtype=torch.bool)
+        mask = torch.zeros_like(shift_labels, dtype=torch.bool)
 
         for token_id in self.weighted_token_ids:
-            mask |= (flat_labels == token_id)
+            mask |= (shift_labels == token_id)
 
         weights[mask] = self.token_weight
 
-        valid = flat_labels != -100
+        valid = shift_labels != -100
 
         loss = (losses * weights)[valid].sum() / weights[valid].sum()
 
