@@ -55,7 +55,7 @@ def main():
         dataloader_num_workers=4,
         seed=24,
     )
-
+    callback = TestCallback(test_ds, test_raw, tokenizer)
     trainer = MTrainer(
         model=model,
         args=args,
@@ -63,11 +63,12 @@ def main():
         eval_dataset=validate_ds,
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),
-            TestCallback(test_ds, test_raw, tokenizer),
+            callback,
         ],
         weighted_token_ids=all_pt_ids,
         token_weight=1.15
     )
+    callback.trainer = trainer
     
     print(f"{'='*50}\nStart training...\n{'='*50}")
     train_result = trainer.train()

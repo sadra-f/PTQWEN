@@ -10,8 +10,7 @@ class TestCallback(TrainerCallback):
         self.tokenizer = tokenizer
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        trainer = kwargs["trainer"]
-        model = trainer.model
+        model = self.trainer.model
         device = model.device
 
         print(f"\nRunning test after epoch {state.epoch:.1f}")
@@ -19,7 +18,7 @@ class TestCallback(TrainerCallback):
         # ------------------------
         # Quantitative evaluation
         # ------------------------
-        metrics = trainer.evaluate(
+        metrics = self.trainer.evaluate(
             eval_dataset=self.test_ds,
             metric_key_prefix="test"
         )
