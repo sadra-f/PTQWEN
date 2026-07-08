@@ -65,8 +65,6 @@ def main():
             EarlyStoppingCallback(early_stopping_patience=3),
             callback,
         ],
-        weighted_token_ids=all_pt_ids,
-        token_weight=1.15
     )
     callback.trainer = trainer
     
