@@ -111,6 +111,8 @@ def main():
     with open("qualitative_test.json", 'w', encoding="utf-8") as f:
         json.dump(all_qualitative, f)
         
+    print(f"{'='*50}\nFinished Training & Testing!\n{'='*50}")
+        
 
 if __name__ == "__main__":
     # freeze_support()   # optional unless freezing to exe, but harmless
