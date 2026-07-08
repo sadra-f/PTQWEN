@@ -37,7 +37,7 @@ def main():
         weight_decay=0.01,
         lr_scheduler_type="cosine",
         warmup_ratio = 0.03,
-        num_train_epochs=7,
+        num_train_epochs=4,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
@@ -82,6 +82,7 @@ def main():
     trainer.save_metrics("test", trainer.evaluate(test_ds))
     all_qualitative = []
     model.eval()
+    print(f"{'='*50}\nStart qualitative test...\n{'='*50}")
     with torch.no_grad():
         for i, inst in enumerate(test_ds):
             input_ids = inst["input_ids"]
@@ -105,6 +106,8 @@ def main():
                 skip_special_tokens=False,
             )
             all_qualitative.append({"question":question, "expected":expected, "generated":generated})
+            if i % 100 == 0:
+                print(f"Finished instance {i} of test dataset.")
     with open("qualitative_test.json", 'w', encoding="utf-8") as f:
         json.dump(all_qualitative, f)
         
