@@ -54,7 +54,7 @@ class ManagePT:
         self.prev_id = None
         self.prev_ri = None
 
-    def _process_single_new_token(self, batched_seq):
+    def _process_single_new_token(self, batched_seq): #TODO: don't redefine a token that is defined previously
         assert batched_seq.shape[1] == 1, f"Use this method in case of the LLM in incermenetal decoding mode! input batched seq has the sequence length {batched_seq.shape[1]} !"
         curr_index = self.last_seen_index + 1
         for bi, batch in enumerate(batched_seq):
