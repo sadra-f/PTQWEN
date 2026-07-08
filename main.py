@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, TrainingArguments
+from transformers import AutoTokenizer, TrainingArguments, Trainer
 from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
 from utils.MTrainer import MTrainer
@@ -56,7 +56,7 @@ def main():
         seed=24,
     )
     callback = TestCallback(test_ds, test_raw, tokenizer)
-    trainer = MTrainer(
+    trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
