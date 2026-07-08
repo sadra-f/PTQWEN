@@ -61,7 +61,10 @@ class ManagePT:
             curr_id = int(batch[-1])
             if curr_id in self.pt_ids:
                 if self._pt_exist(bi, curr_id):
-                    self.pts[bi][int(curr_id)].use_indecies.add(curr_index)
+                    if self.prev_id[bi] == self.cue_id:
+                        print(f"Definition for PT {curr_id} Seen at batch {bi} and index {curr_index} But was previously defined. Skipping addition.")
+                    else:
+                        self.pts[bi][int(curr_id)].use_indecies.add(curr_index)
                 elif self.prev_id[bi] == self.cue_id:
                     self._add_pt(bi, curr_id, cue_index=self.prev_ri[bi], def_end_index=curr_index)
                 else:
