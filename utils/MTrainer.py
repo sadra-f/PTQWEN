@@ -16,6 +16,7 @@ class MTrainer(Trainer):
         labels = inputs["labels"]
 
         outputs = model(**inputs)
+        print(outputs.loss.item())
         logits = outputs.logits
 
         vocab_size = logits.size(-1)
@@ -41,5 +42,16 @@ class MTrainer(Trainer):
         valid = flat_labels != -100
 
         loss = (losses * weights)[valid].sum() / weights[valid].sum()
+
+
+        other_vocab_size = outputs.logits.size(-1)
+
+        my_loss = F.cross_entropy(
+            outputs.logits.view(-1, other_vocab_size),
+            inputs["labels"].view(-1),
+            ignore_index=-100,
+        )
+
+        print(my_loss.item())
 
         return (loss, outputs) if return_outputs else loss
