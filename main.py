@@ -62,7 +62,7 @@ def main():
         eval_dataset=validate_ds,
         # callbacks=[EarlyStoppingCallback(early_stopping_patience=7)],
         weighted_token_ids=all_pt_ids,
-        token_weight=2
+        token_weight=1.15
     )
     
     print(f"{'='*50}\nStart training...\n{'='*50}")
