@@ -1,7 +1,6 @@
 from transformers import TrainerCallback
-import json
-import os
-import torch
+from random import sample
+import json os torch
 
 class TestCallback(TrainerCallback):
     def __init__(self, test_ds, test_raw, tokenizer):
@@ -41,9 +40,7 @@ class TestCallback(TrainerCallback):
         qualitative = []
 
         with torch.no_grad():
-            for i, inst in enumerate(self.test_ds):
-                if i >= 10:
-                    break
+            for i, inst in enumerate(sample(self.test_ds, 10)):
 
                 input_ids = inst["input_ids"]
                 labels = inst["labels"]
