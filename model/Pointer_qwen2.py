@@ -1,7 +1,7 @@
 from PT.Manage import ManagePT
 from collections.abc import Callable
 from typing import Optional
-
+import torch.nn.functional as F
 import torch
 from torch import nn
 
@@ -25,7 +25,24 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from transformers.utils.generic import maybe_autocast, merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from dataclasses import dataclass
+from transformers.utils import ModelOutput
 
+@dataclass
+class PointerProbeOutput(ModelOutput):
+    loss: torch.FloatTensor = None          # whichever Trainer optimizes
+    logits: torch.FloatTensor = None        # whichever Trainer evaluates
+
+    lm_loss: torch.FloatTensor = None
+    lm_logits: torch.FloatTensor = None
+
+    probe_loss: torch.FloatTensor = None
+    probe_logits: torch.FloatTensor = None
+    probe_labels: torch.FloatTensor = None
+
+    hidden_states: tuple = None
+    attentions: tuple = None
+    past_key_values: Cache = None
 
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
@@ -468,7 +485,17 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.model = Qwen2Model(config, pt_ids_sorted)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
+        self._pt_ids_sorted = pt_ids_sorted
+        # ================================================================ #
+        self.linear_probe = nn.Linear(
+            config.hidden_size,
+            len(pt_ids_sorted) + 1,
+            bias=False
+        )
+        self._pt_to_class  = {
+            token: i + 1 for i, token in enumerate(self._pt_ids_sorted)
+        }
+        # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -517,18 +544,48 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+        # ================================================================ #
+        probe_labels = torch.full_like(input_ids, -100)
+
+        for token_id, cls in self._pt_to_class.items():
+            probe_labels[input_ids == token_id] = cls
+        detached_hidden_state = hidden_states.detach()
+        probe_logits = self.linear_probe(detached_hidden_state)
+        # ================================================================ #
 
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
+            probe_loss = F.cross_entropy(
+                probe_logits.view(-1, probe_logits.size(-1)),
+                probe_labels.view(-1),
+                ignore_index=-100
+            )
+
+        return PointerProbeOutput(
+            loss=probe_loss,
+            logits=probe_logits,
+            
+            lm_loss=loss,
+            lm_logits=logits,
+            
+            probe_loss=probe_loss,
+            probe_logits=probe_logits,
+            probe_labels=probe_labels,
+
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            past_key_values=outputs.past_key_values,
         )
+    
+    def freeze_pretrained_model(self):
+        for param in self.model.parameters():
+            param.requires_grad = False
+        for param in self.lm_head.parameters():
+            param.requires_grad = False
+        for param in self.linear_probe.parameters():
+            param.requires_grad = True
 
 
 class Qwen2ForSequenceClassification(GenericForSequenceClassification, Qwen2PreTrainedModel):
