@@ -70,7 +70,7 @@ def main():
     
     print(f"{'='*50}\nStart training...\n{'='*50}")
     train_result = trainer.train()
-#    trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-20000")
+    # trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-20000")
     trainer.save_state()
     trainer.save_model("./final_model")
     tokenizer.save_pretrained("./final_model")
