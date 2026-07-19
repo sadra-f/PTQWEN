@@ -549,8 +549,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         for token_id, cls in self._pt_to_class.items():
             probe_labels[input_ids == token_id] = cls
+        probe_labels = probe_labels[:, 1:]
         detached_hidden_state = hidden_states.detach()
-        probe_logits = self.linear_probe(detached_hidden_state)
+        probe_logits = self.linear_probe(detached_hidden_state[:, :-1, :])
         # ================================================================ #
 
         loss = None

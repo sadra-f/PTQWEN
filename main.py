@@ -10,29 +10,26 @@ from transformers import EarlyStoppingCallback
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2.5-1.5B", 
-        cache_dir="model_cache/"
+    tokenizer = AutoTokenizer.from_pretrained("final_model/"
     )
 
     pt_tokens = ["<|PT_CUE|>"]
     pt_tokens.extend([f"<|PT{v}|>" for v in range(19)])
-    _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
+    # _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
     all_pt_ids = tokenizer.encode("".join(pt_tokens))
     CUE_token_id = all_pt_ids[0]
     PT_token_ids = all_pt_ids[1:]
-    tokenizer.pad_token = tokenizer.eos_token
-    assert len(pt_tokens) == _added_tokens
+    #tokenizer.pad_token = tokenizer.eos_token
+    #assert len(pt_tokens) == _added_tokens
 
     train_ds = preprocess_file("Dataset/train.jsonl", tokenizer)
     validate_ds = preprocess_file("Dataset/validate.jsonl", tokenizer)
     test_ds, test_raw = preprocess_file("Dataset/test.jsonl", tokenizer, True)
 
     model = Qwen2ForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-1.5B", 
+        "final_model/", 
         sorted(all_pt_ids), 
-        attn_implementation="eager", 
-        cache_dir="model_cache/"
+        # attn_implementation="eager", 
         # "model/",
         # sorted(all_pt_ids)
     )
@@ -48,7 +45,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         num_train_epochs=15,
-        per_device_train_batch_size=2,
+        per_device_train_batch_size=8,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
@@ -59,10 +56,11 @@ def main():
         save_steps=3,
         save_total_limit=1,
         logging_steps=10,
-        metric_for_best_model="eval_loss",
+        # metric_for_best_model="eval_loss",
         remove_unused_columns=False,
         dataloader_num_workers=4,
         seed=24,
+        metric_for_best_model="probe_f1",
     )
     # callback = TestCallback(test_ds, test_raw, tokenizer)
     trainer = ProbeTrainer(
@@ -71,7 +69,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=validate_ds,
         callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=3),
+            EarlyStoppingCallback(early_stopping_patience=4),
         ],
         compute_metrics = compute_probe_metrics
     )

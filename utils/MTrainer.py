@@ -131,6 +131,7 @@ class ProbeTrainer(Trainer):
             "probe_precision": precision,
             "probe_recall": recall,
             "probe_f1": f1,
+            "eval_probe_f1": f1,
         }
     
 
