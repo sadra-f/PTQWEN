@@ -2,7 +2,7 @@ from PT.Manage import ManagePT
 from collections.abc import Callable
 from typing import Optional
 import torch.nn.functional as F
-import torch
+import torch, math
 from torch import nn
 
 from transformers.activations import ACT2FN
@@ -27,6 +27,32 @@ from transformers.utils.output_capturing import capture_outputs
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from dataclasses import dataclass
 from transformers.utils import ModelOutput
+
+
+class HiddenStateMemory:
+    def __init__(self, batch_count, hidden_size):
+        self.memory = torch.zeros((batch_count, 0, hidden_size))
+
+class PointerRetrieval(nn.Module):
+    def __init__(self, config:Qwen2Config):
+        super.__init__()
+        self.k_w = nn.Linear(config.hidden_size, config.hidden_size)
+        self.q_w = nn.Linear(config.hidden_size, config.hidden_size)
+        self.scaling = 1.0 / math.sqrt(config.hidden_size)
+    def forward(self, selected_hidden_state_history, current_hidden_state):
+        q_proj = self.q_w(current_hidden_state)
+        q_proj = F.normalize(q_proj, dim=-1)
+
+        k_proj = self.k_w(selected_hidden_state_history)
+        k_proj = F.normalize(k_proj, dim=-1)
+
+        scores = torch.matmul(q_proj, k_proj.transpose(-1,-2)).squeeze(1)
+        scores *= self.scaling
+
+        probs = F.softmax(scores, dim=-1).to(current_hidden_state.device)
+
+        return probs
+
 
 @dataclass
 class PointerProbeOutput(ModelOutput):
@@ -495,6 +521,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self._pt_to_class  = {
             token: i + 1 for i, token in enumerate(self._pt_ids_sorted)
         }
+        self.hidden_state_mem = None
+        self.pointer_selector = PointerRetrieval(config)
+
         # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
@@ -530,6 +559,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        # ================================================================ #
+        if input_ids.shape[1] > 1: 
+            #FIXME: only works with supervised training and testing breaks in chat with user since it resets when recieveing input of length larger than 1!!
+            self.hidden_state_mem = HiddenStateMemory(input_ids.shape[0], self.config.hidden_size)
+        # ================================================================ #
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -545,6 +579,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         # ================================================================ #
+        #                       Train gate/probe
         probe_labels = torch.full_like(input_ids, -100)
 
         for token_id, cls in self._pt_to_class.items():
@@ -552,6 +587,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         probe_labels = probe_labels[:, 1:]
         detached_hidden_state = hidden_states.detach()
         probe_logits = self.linear_probe(detached_hidden_state[:, :-1, :])
+        # ================================================================ #
+        # ================================================================ #
+        #                       Train pointer selector
+        referent_indecies = self.model.pt_manager.referent_indecies()
+        #TODO: how to mean pool properly ?
         # ================================================================ #
 
         loss = None
