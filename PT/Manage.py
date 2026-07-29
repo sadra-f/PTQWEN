@@ -16,7 +16,7 @@ class PT:
         return self._ref_seq_start_index
         
     @ref_seq_start_index.setter
-    def ref_seq_start_index_setter(self, value):
+    def ref_seq_start_index(self, value):
         assert value == self.cue_index + 1
         self._ref_seq_start_index = value
     
@@ -25,7 +25,7 @@ class PT:
         return self._ref_seq_end_index
     
     @ref_seq_end_index.setter
-    def ref_seq_end_index_setter(self, value):
+    def ref_seq_end_index(self, value):
         assert value == self.def_end_index - 1
         self._ref_seq_end_index = value
 
@@ -143,3 +143,10 @@ class ManagePT:
                     res_bias[pto.batch_index, :, :, seq_index] = att_weights * -self.redist_multiplier
                     res_bias[pto.batch_index, :, :, pto.ref_seq_start_index:pto.def_end_index] = (att_weights * self.redist_multiplier).unsqueeze(-1)
         return res_bias
+
+    def referent_indecies(self) -> dict[int, tuple[int,int]]:
+        res = dict()
+        pt:PT
+        for pt in self.pts.values():
+            res[pt.id] = (pt.ref_seq_start_index, pt.ref_seq_end_index)
+        return res
