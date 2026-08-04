@@ -10,24 +10,23 @@ from transformers import EarlyStoppingCallback
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = AutoTokenizer.from_pretrained("final_model/"
-    )
+    tokenizer = AutoTokenizer.from_pretrained("model_cache/models--Qwen--Qwen2.5-1.5B/snapshots/8faed761d45a263340a0528343f099c05c9a4323")
 
     pt_tokens = ["<|PT_CUE|>"]
     pt_tokens.extend([f"<|PT{v}|>" for v in range(19)])
-    # _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
+    _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
     all_pt_ids = tokenizer.encode("".join(pt_tokens))
     CUE_token_id = all_pt_ids[0]
     PT_token_ids = all_pt_ids[1:]
     #tokenizer.pad_token = tokenizer.eos_token
-    #assert len(pt_tokens) == _added_tokens
+    assert len(pt_tokens) == _added_tokens
 
     train_ds = preprocess_file("Dataset/train.jsonl", tokenizer)
     validate_ds = preprocess_file("Dataset/validate.jsonl", tokenizer)
     test_ds, test_raw = preprocess_file("Dataset/test.jsonl", tokenizer, True)
 
     model = Qwen2ForCausalLM.from_pretrained(
-        "final_model/", 
+        "model_cache/models--Qwen--Qwen2.5-1.5B/snapshots/8faed761d45a263340a0528343f099c05c9a4323", 
         sorted(all_pt_ids), 
         # attn_implementation="eager", 
         # "model/",
@@ -45,7 +44,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         num_train_epochs=15,
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=2,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
