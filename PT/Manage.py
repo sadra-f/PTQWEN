@@ -144,9 +144,37 @@ class ManagePT:
                     res_bias[pto.batch_index, :, :, pto.ref_seq_start_index:pto.def_end_index] = (att_weights * self.redist_multiplier).unsqueeze(-1)
         return res_bias
 
-    def referent_indecies(self) -> dict[int, tuple[int,int]]:
-        res = dict()
-        pt:PT
-        for pt in self.pts.values():
-            res[pt.id] = (pt.ref_seq_start_index, pt.ref_seq_end_index)
+    def referent_indecies(self):
+        """for each batch returns a dict containing the pointer ids and the indices of the subsequence they refer to.
+
+        Returns:
+            list[dict], list: the indices of subsequences referred to in each batch. And the numer distinct pointers in each of the batches.
+        """
+        res = [dict() for _ in range(len(self.pts))]
+        per_batch_count = [0 for _ in range(len(self.pts))]
+        for pts_dict in self.pts:
+            for pts_key in sorted(pts_dict):
+                res[pts_dict[pts_key].batch_index][pts_dict[pts_key].id] = torch.arange(pts_dict[pts_key].ref_seq_start_index,pts_dict[pts_key].ref_seq_end_index+1, 1) # (pt.ref_seq_start_index, pt.ref_seq_end_index)
+                per_batch_count[pts_dict[pts_key].batch_index] += 1
+        return res, per_batch_count
+
+
+    def signifier_used_indices(self):
+        """returns the id of the pointer tokens that are used in each batch and the context indices thay are used in.
+
+        Returns:
+            list[dict]: _description_
+        """
+        res = [dict() for _ in range(len(self.pts))]
+        for pts_dict in self.pts:
+            for pts_key in sorted(pts_dict):
+                res[pts_dict[pts_key].batch_index][pts_dict[pts_key].id] = list(pts_dict[pts_key].use_indecies)
         return res
+
+    def used_pt_indices(self):
+        """Returns the list of distinct pointer ids used in each batch.
+
+        Returns:
+            list[list]: List of distinct pointer ids used in each batch.
+        """
+        return [sorted(b_pts.keys()) for b_pts in self.pts]
