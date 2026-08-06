@@ -30,8 +30,8 @@ from transformers.utils import ModelOutput
 
 
 class HiddenStateMemory:
-    def __init__(self, batch_count, hidden_size):
-        self.memory = torch.zeros((batch_count, 0, hidden_size))
+    def __init__(self, batch_count, hidden_size, device):
+        self.memory = torch.zeros((batch_count, 0, hidden_size), device=device)
 
 class PointerRetrieval(nn.Module):
     def __init__(self, config:Qwen2Config):
@@ -571,11 +571,10 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         # ================================================================ #
-        if input_ids.shape[1] > 1: 
-            #FIXME: only works with supervised training and testing breaks in chat with user since it resets when recieveing input of length larger than 1!!
-            self.hidden_state_mem = HiddenStateMemory(input_ids.shape[0], self.config.hidden_size)
-        if self.pt_selector_history is None:
-            self.pt_selector_history = torch.zeros([input_ids.shape[0],0])
+        if past_key_values is None: 
+            self.hidden_state_mem = HiddenStateMemory(input_ids.shape[0], self.config.hidden_size, self.device)
+        # if self.pt_selector_history is None:
+            # self.pt_selector_history = torch.zeros([input_ids.shape[0],0])
         # ================================================================ #
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -593,7 +592,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         # ================================================================ #
         #                    extarct data / build GT
-        self.hidden_state_mem.memory = torch.cat([self.hidden_state_mem.memory, hidden_states.detach()], dim=1)
+        self.hidden_state_mem.memory = torch.cat([self.hidden_state_mem.memory, hidden_states.detach()], dim=1).to(hidden_states.device)
         _batch_count = input_ids.shape[0]
         referent_indecies, per_batch_count = self.model.pt_manager.referent_indecies()
         _max_pt_in_batch = max(per_batch_count)
@@ -633,15 +632,15 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 pt_head_mask[bi][-missing_count:] = False
 
         pt_selector_logits = self.pointer_selector(pt_head_history_input, hidden_states[:, slice_indices, :].detach(), pt_head_mask)
-        self.pt_selector_history = torch.cat([self.pt_selector_history, F.softmax(pt_selector_logits, dim=-1).argmax(dim=-1)], dim=1)
-        probe_pt_selected_indices = (F.sigmoid(probe_logits) > 0.5).squeeze(-1)
+        # self.pt_selector_history = torch.cat([self.pt_selector_history, F.softmax(pt_selector_logits, dim=-1).argmax(dim=-1)], dim=1)
+        probe_pt_is_selected = torch.argmax(probe_logits, dim=-1)
         # ================================================================ #
         # ================================================================ #
         #                 route pt decision if in route mode
         if self.route_pt_head:
             vocabularized_pt_head = torch.full((_batch_count, pt_selector_logits.shape[1], self.config.vocab_size), float("-inf"), device=self.device)
             for bi, b_vals in enumerate(self._current_pt_id_to_class):
-                positions = torch.nonzero(probe_pt_selected_indices[bi]).squeeze(-1)
+                positions = torch.nonzero(probe_pt_is_selected[bi]).squeeze(-1)
                 vocab_ids = torch.tensor(
                     list(b_vals.keys()),
                     device=vocabularized_pt_head.device
@@ -649,7 +648,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
                 vocabularized_pt_head[bi, positions[:, None], vocab_ids[None, :]] = pt_selector_logits[bi, positions, :per_batch_count[bi]].float()
 
-            model_logits = torch.where()
+            model_logits = torch.where(probe_pt_is_selected.bool().unsqueeze(-1), vocabularized_pt_head, logits)
 
         # ================================================================ #
 
@@ -658,9 +657,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
             probe_loss = F.cross_entropy(
-                probe_logits.squeeze(-1).to(torch.float),
-                probe_labels.float()
-            )
+                probe_logits[:, :-1].reshape(-1, 2).float(),
+                probe_labels[:, 1:].reshape(-1).long()
+                )
             pt_head_loss = F.cross_entropy(
                 pt_selector_logits.reshape(-1, pt_selector_logits.size(-1)),
                 pt_selector_labels.reshape(-1),
