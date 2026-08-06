@@ -35,9 +35,9 @@ def main():
 
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
+    model.freeze_pretrained_model()# freezes the pretrained model parameters and only allows the linear probe to be trained. doesn't change on PT affect.
     model.model.set_req_grad_half(False) # unfreezes half of the model parameters and turns on PT affect.
-    model.freeze_pretrained_model()# freezes the pretrained model parameters and only allows the linear probe to be trained. doesn't turn on PT affect.
-
+    
     args = TrainingArguments(
         output_dir="./checkpoints_probe",
         weight_decay=0.01,
