@@ -613,8 +613,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # ================================================================ #
         # ================================================================ #
         #                       Train gate/probe
-        detached_hidden_state = hidden_states.detach()
-        probe_logits = self.linear_probe(detached_hidden_state[:, slice_indices, :])
+        # detached_hidden_state = hidden_states.detach()
+        probe_logits = self.linear_probe(hidden_states[:, slice_indices, :])
         # ================================================================ #
         # ================================================================ #
         #                       Train pointer selector
