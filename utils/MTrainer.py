@@ -159,3 +159,22 @@ def compute_probe_metrics(eval_pred):
         "probe_recall": recall,
         "probe_f1": f1,
     }
+
+
+
+from transformers import Trainer
+
+
+class PTHeadTrainer(Trainer):
+    """
+    Trainer that optimizes only the pointer head.
+    """
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+
+        loss = outputs.pt_selector_loss
+
+        if return_outputs:
+            return loss, outputs
+        return loss
