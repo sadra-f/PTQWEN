@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer
 from model.Pointer_qwen2 import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
-from utils.MTrainer import ProbeTrainer, compute_probe_metrics
+from utils.MTrainer import ProbeTrainer, compute_clsf_metrics, PTHeadTrainer
 from utils.Testcallback import TestCallback
 import torch, json
 from transformers import EarlyStoppingCallback
@@ -35,8 +35,9 @@ def main():
 
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
+    model.model.set_req_grad_half(True) # unfreezes half of the model parameters and turns on PT affect.
     model.freeze_pretrained_model()# freezes the pretrained model parameters and only allows the linear probe to be trained. doesn't change on PT affect.
-    model.model.set_req_grad_half(False) # unfreezes half of the model parameters and turns on PT affect.
+    model.freeze_linear_probe()
     
     args = TrainingArguments(
         output_dir="./checkpoints_probe",
@@ -62,7 +63,7 @@ def main():
         metric_for_best_model="probe_f1",
     )
     # callback = TestCallback(test_ds, test_raw, tokenizer)
-    trainer = ProbeTrainer(
+    trainer = PTHeadTrainer(
         model=model,
         args=args,
         train_dataset=train_ds,
@@ -70,7 +71,7 @@ def main():
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=4),
         ],
-        compute_metrics = compute_probe_metrics
+        compute_metrics = compute_clsf_metrics
     )
     # callback.trainer = trainer
 
