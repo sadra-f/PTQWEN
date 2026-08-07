@@ -613,8 +613,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # ================================================================ #
         # ================================================================ #
         #                       Train gate/probe
-        # detached_hidden_state = hidden_states.detach()
-        probe_logits = self.linear_probe(hidden_states[:, slice_indices, :])
+        detached_hidden_state = hidden_states.detach()
+        probe_logits = self.linear_probe(detached_hidden_state[:, slice_indices, :])
         # ================================================================ #
         # ================================================================ #
         #                       Train pointer selector
@@ -624,6 +624,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         pt_head_mask = torch.ones((_batch_count, _max_pt_in_batch), device=hidden_states.device, dtype=torch.bool)
         for bi, b_pts in enumerate(referent_indecies): # bi => batch_index, b_pts => batch pointer tokens
             for pt_id in sorted(b_pts):
+                # hidden_state_mem.memory holds already detached tensros so no detaching here!
                 mean_pools[bi].append(self.hidden_state_mem.memory[bi, b_pts[pt_id], :].mean(dim=0))
                 pt_lookup[bi].append(pt_id)
             missing_count = _max_pt_in_batch - len(mean_pools[bi])
@@ -690,6 +691,10 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             param.requires_grad = False
         for param in self.lm_head.parameters():
             param.requires_grad = False
+        for param in self.linear_probe.parameters():
+            param.requires_grad = True
+
+    def freeze_linear_probe(self):
         for param in self.linear_probe.parameters():
             param.requires_grad = True
 
