@@ -2,3 +2,5 @@ __pycache__/
 .venv/
 venv/
 model_cache/
+PTQWEN_all_tuned/
+PTQWEN_lowlr_noscale/
