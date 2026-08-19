@@ -53,6 +53,12 @@ class ManagePT:
         self.last_seen_index = -1
         self.prev_id = None
         self.prev_ri = None
+    @property
+    def not_mid_definition(self):
+        return torch.tensor(self.prev_id) != self.cue_id
+    @property
+    def has_any_pointer(self):
+        return torch.tensor([len(batch_pts) for batch_pts in self.pts], dtype=bool)
 
     def _process_single_new_token(self, batched_seq): #TODO: don't redefine a token that is defined previously
         assert batched_seq.shape[1] == 1, f"Use this method in case of the LLM in incermenetal decoding mode! input batched seq has the sequence length {batched_seq.shape[1]} !"
