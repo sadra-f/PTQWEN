@@ -1,5 +1,5 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer
-from model.Pointer_qwen2 import Qwen2ForCausalLM
+from model.remote_qwen import Qwen2ForCausalLM
 from utils.preprocess import preprocess_file
 from utils.MTrainer import ProbeTrainer, compute_clsf_metrics, PTHeadTrainer
 from utils.Testcallback import TestCallback
@@ -10,41 +10,48 @@ from transformers import EarlyStoppingCallback
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = AutoTokenizer.from_pretrained("model_cache/models--Qwen--Qwen2.5-1.5B/snapshots/8faed761d45a263340a0528343f099c05c9a4323")
+    tokenizer = AutoTokenizer.from_pretrained("PTQWEN_all_tuned/")
 
     pt_tokens = ["<|PT_CUE|>"]
     pt_tokens.extend([f"<|PT{v}|>" for v in range(19)])
-    _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
+    # _added_tokens = tokenizer.add_special_tokens({"extra_special_tokens": pt_tokens})
     all_pt_ids = tokenizer.encode("".join(pt_tokens))
     CUE_token_id = all_pt_ids[0]
     PT_token_ids = all_pt_ids[1:]
     #tokenizer.pad_token = tokenizer.eos_token
-    assert len(pt_tokens) == _added_tokens
+    # assert len(pt_tokens) == _added_tokens
 
     train_ds = preprocess_file("Dataset/train.jsonl", tokenizer)
     validate_ds = preprocess_file("Dataset/validate.jsonl", tokenizer)
     test_ds, test_raw = preprocess_file("Dataset/test.jsonl", tokenizer, True)
 
     model = Qwen2ForCausalLM.from_pretrained(
-        "model_cache/models--Qwen--Qwen2.5-1.5B/snapshots/8faed761d45a263340a0528343f099c05c9a4323", 
+        "PTQWEN_all_tuned/",
         sorted(all_pt_ids), 
         # attn_implementation="eager", 
         # "model/",
         # sorted(all_pt_ids)
     )
+    print(model)
+
+    with open("main.py") as cf:
+        print(cf.read())
+    with open("model/Pointer_qwen2.py") as cf:
+        print(cf.read())
+    with open("utils/MTrainer.py")as cf:
+        print(cf.read())
 
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
     model.model.set_req_grad_half(True) # unfreezes half of the model parameters and turns on PT affect.
-    model.freeze_pretrained_model()# freezes the pretrained model parameters and only allows the linear probe to be trained. doesn't change on PT affect.
-    model.freeze_linear_probe()
+    model.model.set_req_grad_other_half(False)
     
     args = TrainingArguments(
-        output_dir="./checkpoints_probe",
+        output_dir="./tmp_code_res",
         weight_decay=0.01,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        num_train_epochs=15,
+        num_train_epochs=25,
         per_device_train_batch_size=2,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
@@ -74,23 +81,24 @@ def main():
         compute_metrics = compute_clsf_metrics
     )
     # callback.trainer = trainer
-
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print(name, p.numel(), p.dtype)
     print(f"{'='*50}\nStart training The Probe...\n{'='*50}")
     train_result = trainer.train()
+    print(train_result)
     # trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-20000")
     trainer.save_state()
-    trainer.save_model("./final_model_probe")
-    tokenizer.save_pretrained("./final_model_probe")
+    trainer.save_model("./tmp_code_res")
+    tokenizer.save_pretrained("./tmp_code_res")
+    print(f"{'='*50}\nFinished Training The Probe\n{'='*50}")
     # test_results = trainer.evaluate(test_ds)
     # print(test_results)
 
     # with open("test_results.json", "w") as f:
     #     json.dump(test_results, f, indent=4)
-    # trainer.save_metrics("train", train_result.metrics)
-    # trainer.save_metrics("eval", trainer.evaluate(validate_ds))
-    # trainer.save_metrics("test", trainer.evaluate(test_ds))
-    all_qualitative = []
-    model.eval()
+    # all_qualitative = []
+    # model.eval()
     # print(f"{'='*50}\nStart qualitative test...\n{'='*50}")
     # with torch.no_grad():
     #     for i, inst in enumerate(test_ds):

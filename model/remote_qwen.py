@@ -36,9 +36,18 @@ class HiddenStateMemory:
 class PointerRetrieval(nn.Module):
     def __init__(self, config:Qwen2Config):
         super().__init__()
-        self.k_w = nn.Linear(config.hidden_size, config.hidden_size)
-        self.q_w = nn.Linear(config.hidden_size, config.hidden_size)
-        self.scaling = 1.0 / math.sqrt(config.hidden_size)
+        self.k_w = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.SiLU(),
+            nn.Linear(config.hidden_size, config.hidden_size)
+            )
+        self.q_w = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.SiLU(),
+            nn.Linear(config.hidden_size, config.hidden_size)
+            )
+
+        # self.scaling = 1.0 / math.sqrt(config.hidden_size)
 
     def forward(self, selected_hidden_state_history, current_hidden_state, mask, output_logits=True):
         q_proj = self.q_w(current_hidden_state)
@@ -48,7 +57,7 @@ class PointerRetrieval(nn.Module):
         k_proj = F.normalize(k_proj, dim=-1)
 
         scores = torch.matmul(q_proj, k_proj.transpose(-1,-2)).squeeze(1)
-        scores *= self.scaling
+        # scores *= self.scaling
 
         scores = torch.masked_fill(scores, ~mask.unsqueeze(1), -1e9)
         if not output_logits:
@@ -507,6 +516,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     p.requires_grad = set_to
                 l.self_attn.check_calc_pt_bias()
 
+    def set_req_grad_other_half(self, set_to=False):
+        for i, l in enumerate(self.layers):
+            if i % 2 == 1:
+                for p in l.parameters():
+                    p.requires_grad = set_to
+                l.self_attn.check_calc_pt_bias()
+
 @auto_docstring
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
@@ -535,7 +551,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.pointer_selector = PointerRetrieval(config)
         self.route_pt_head = not self.training
         self.pt_selector_history = None
-        self.selector_attn = nn.MultiheadAttention(self.config.hidden_size, 4, 0.005, batch_first=True)
+        self.inp_id_history = None
         # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
@@ -572,10 +588,19 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         # ================================================================ #
-        if past_key_values is None: 
+        print("="*50)
+        print(f"PASSIING THROUGH inp_ids shape: {input_ids.shape}")
+        if past_key_values is None or self.hidden_state_mem is None:
+            print("CREATING HIDDEN STATE MEMORY OBJECT!")
             self.hidden_state_mem = HiddenStateMemory(input_ids.shape[0], self.config.hidden_size, self.device)
-        # if self.pt_selector_history is None:
-            # self.pt_selector_history = torch.zeros([input_ids.shape[0],0])
+            self.inp_id_history = torch.zeros((input_ids.shape[0], 0), dtype=torch.int, device=self.device)
+        if past_key_values is not None:
+            if not past_key_values.is_initialized:
+                self.hidden_state_mem = HiddenStateMemory(input_ids.shape[0], self.config.hidden_size, self.device)
+                self.inp_id_history = torch.zeros((input_ids.shape[0], 0), dtype=torch.int, device=self.device)
+
+        print("="*50)
+        self.inp_id_history = torch.cat([self.inp_id_history, input_ids], dim=-1).to(torch.int)
         # ================================================================ #
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -591,9 +616,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+        # for bi in range(len(input_ids)):
+        #     if self.model.pt_manager.not_mid_definition[bi]:
+        #         logits[bi,:, self.model.pt_manager.pt_ids] = -torch.inf
+        # logits[self.model.pt_manager.not_mid_definition, :, self.model.pt_manager.pt_ids] = -torch.inf
         # ================================================================ #
         #                    extarct data / build GT
-        self.hidden_state_mem.memory = torch.cat([self.hidden_state_mem.memory, hidden_states.detach()], dim=1).to(hidden_states.device)
+        self.hidden_state_mem.memory = torch.cat([self.hidden_state_mem.memory, hidden_states], dim=1).to(hidden_states.device)
         _batch_count = input_ids.shape[0]
         referent_indecies, per_batch_count = self.model.pt_manager.referent_indecies()
         _max_pt_in_batch = max(per_batch_count)
@@ -601,6 +630,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self._current_pt_id_to_class = [{pt_id: i for i,pt_id in enumerate(sorted(signifer_use_ids[bi]))} for bi in range(_batch_count)]
         self._current_pt_class_to_id = [{i: pt_id for i,pt_id in enumerate(sorted(signifer_use_ids[bi]))} for bi in range(_batch_count)]
         # _tmp_pt_class_ref = [{pt_id: i for i,pt_id in enumerate(sorted(signifer_use_ids[bi]))} | {i: pt_id for i,pt_id in enumerate(sorted(signifer_use_ids[bi]))} for bi in range(_batch_count)]
+        probe_labels = None
+        pt_selector_labels = None
         if not self.route_pt_head:
             probe_labels = torch.zeros_like(input_ids)
             pt_selector_labels = torch.full((_batch_count, hidden_states.shape[1]), -100, device=hidden_states.device,dtype=torch.long)
@@ -614,68 +645,83 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # ================================================================ #
         # ================================================================ #
         #                       Train gate/probe
-        detached_hidden_state = hidden_states.detach()
+        detached_hidden_state = hidden_states
         probe_logits = self.linear_probe(detached_hidden_state[:, slice_indices, :])
+        # print("*"*7,probe_logits,"*"*7,F.softmax(probe_logits, dim=-1),"*"*7)
         # ================================================================ #
         # ================================================================ #
         #                       Train pointer selector
-        pools = [[] for _ in range(_batch_count)]
+        pointer_span_selections = [[] for _ in range(_batch_count)]
         pt_lookup = [[] for _ in range(_batch_count)]
-        pt_head_history_input = torch.zeros((_batch_count, _max_pt_in_batch, self.config.hidden_size), device=hidden_states.device, dtype=torch.bfloat16)
+        pt_head_historical_input = torch.zeros((_batch_count, _max_pt_in_batch, self.config.hidden_size), device=hidden_states.device, dtype=torch.bfloat16)
         pt_head_mask = torch.ones((_batch_count, _max_pt_in_batch), device=hidden_states.device, dtype=torch.bool)
         for bi, b_pts in enumerate(referent_indecies): # bi => batch_index, b_pts => batch pointer tokens
             for pt_id in sorted(b_pts):
                 # hidden_state_mem.memory holds already detached tensros so no detaching here!
-                pools[bi].append(self.hidden_state_mem.memory[bi, b_pts[pt_id][-1]+1, :])
+                #mean_pools[bi].append(torch.cat([self.hidden_state_mem.memory[bi, b_pts[pt_id], :].mean(dim=0), self.hidden_state_mem.memory[bi, b_pts[pt_id][-1], :]]))
+                pointer_span_selections[bi].append(self.hidden_state_mem.memory[bi, b_pts[pt_id][0]+1, :])
                 pt_lookup[bi].append(pt_id)
-            missing_count = _max_pt_in_batch - len(pools[bi])
-            pt_head_history_input[bi] = torch.stack(pools[bi]+[torch.zeros(self.config.hidden_size, device=hidden_states.device, dtype=torch.bfloat16) for _ in range(missing_count)])
+            missing_count = _max_pt_in_batch - len(pointer_span_selections[bi])
             if missing_count > 0:
                 pt_head_mask[bi][-missing_count:] = False
+            if len(pointer_span_selections[bi]) < 1:
+                continue
+#            missing_count = _max_pt_in_batch - len(mean_pools[bi])
+            # print(len(mean_pools), '   ', mean_pools[-1], missing_count, _max_pt_in_batch)
+            pt_head_historical_input[bi] = torch.stack(pointer_span_selections[bi]+[torch.zeros(self.config.hidden_size, device=hidden_states.device, dtype=torch.bfloat16) for _ in range(missing_count)])
 
-
-        # att_pooled_input, selector_pre_att_weights = self.selector_attn(query=hidden_states[:, slice_indices, :], key=pt_head_history_input, value=pt_head_history_input)
-        # pt_selector_logits = self.pointer_selector(att_pooled_input, hidden_states[:, slice_indices, :].detach(), pt_head_mask)
-        pt_selector_logits = self.pointer_selector(pt_head_history_input, hidden_states[:, slice_indices, :].detach(), pt_head_mask)
+        # pt_head_history_input = self.pooling_projector(pt_head_history_input)
+        pt_selector_logits = self.pointer_selector(pt_head_historical_input, hidden_states[:, slice_indices, :], pt_head_mask)
         # self.pt_selector_history = torch.cat([self.pt_selector_history, F.softmax(pt_selector_logits, dim=-1).argmax(dim=-1)], dim=1)
-        probe_pt_is_selected = torch.argmax(probe_logits, dim=-1)
+        # probe_pt_is_selected = torch.argmax(probe_logits, dim=-1)
+        probe_pt_is_selected = torch.argmax((F.softmax(probe_logits, dim=-1) > 0.85).long(), dim=-1)
         # ================================================================ #
         # ================================================================ #
         #                 route pt decision if in route mode
+        model_logits = logits
         if self.route_pt_head:
+            #TODO: replace init of vocabularized_pt_head with the minimized values from logits of lm_head
             vocabularized_pt_head = torch.full((_batch_count, pt_selector_logits.shape[1], self.config.vocab_size), float("-inf"), device=self.device)
             for bi, b_vals in enumerate(self._current_pt_id_to_class):
+                if not self.model.pt_manager.has_any_pointer[bi]:
+                    continue
                 positions = torch.nonzero(probe_pt_is_selected[bi]).squeeze(-1)
                 vocab_ids = torch.tensor(
                     list(b_vals.keys()),
                     device=vocabularized_pt_head.device
                 )
+                if torch.numel(positions) < 1:
+                    continue
 
                 vocabularized_pt_head[bi, positions[:, None], vocab_ids[None, :]] = pt_selector_logits[bi, positions, :per_batch_count[bi]].float()
-
+            probe_pt_is_selected = probe_pt_is_selected & self.model.pt_manager.not_mid_definition.unsqueeze(-1)
             model_logits = torch.where(probe_pt_is_selected.bool().unsqueeze(-1), vocabularized_pt_head, logits)
 
         # ================================================================ #
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=model_logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+        probe_loss = None
+        if probe_labels is not None:
             probe_loss = F.cross_entropy(
                 probe_logits[:, :-1].reshape(-1, 2).float(),
                 probe_labels[:, 1:].reshape(-1).long()
                 )
+        selector_loss = None
+        if pt_selector_labels is not None:
             selector_loss = F.cross_entropy(
                 pt_selector_logits.reshape(-1, pt_selector_logits.size(-1)),
                 pt_selector_labels.reshape(-1),
                 ignore_index=-100,
             )
-        return PointerProbeOutput(
-            pt_selector_loss=selector_loss,
-            pt_selector_logits = pt_selector_logits,
-            pt_selector_labels=pt_selector_labels,
 
-            loss=loss + probe_loss + selector_loss,
+        return PointerProbeOutput(
+            pt_selector_loss = selector_loss,
+            pt_selector_logits = pt_selector_logits,
+            pt_selector_labels = pt_selector_labels,
+
+            loss= selector_loss + probe_loss + loss if (selector_loss is not None and probe_loss is not None) else loss,
             logits=model_logits,
             
             lm_loss=loss,
@@ -697,6 +743,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             param.requires_grad = False
         for param in self.linear_probe.parameters():
             param.requires_grad = True
+    def ultimate_freezer(self):
+        self.freeze_pretrained_model()
+        self.freeze_linear_probe()
+        for param in self.pointer_selector.parameters():
+            param.requires_grad = False
 
     def freeze_linear_probe(self):
         for param in self.linear_probe.parameters():
