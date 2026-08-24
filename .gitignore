@@ -4,3 +4,4 @@ venv/
 model_cache/
 PTQWEN_all_tuned/
 PTQWEN_lowlr_noscale/
+tmp.py
