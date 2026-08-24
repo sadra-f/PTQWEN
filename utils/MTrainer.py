@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from transformers import Trainer
-
+from sklearn.metrics import confusion_matrix
 class MTrainer(Trainer):
     """
     Trainer Class to apply weight to the loss of PT tokens to speed up model learning.
@@ -60,3 +60,101 @@ class MTrainer(Trainer):
         print(f"{'='*50}\n")
 
         return (loss, outputs) if return_outputs else loss
+    
+
+class ProbeTrainer(Trainer):
+    """Trainer Class to only compute the loss for the linear probe classifer and ignore training the LM itself.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss = outputs.probe_loss
+        return (loss, outputs) if return_outputs else loss
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+
+        dataloader = self.get_eval_dataloader(eval_dataset)
+
+        self.model.eval()
+
+        all_preds = []
+        all_labels = []
+
+        with torch.no_grad():
+
+            for inputs in dataloader:
+
+                inputs = self._prepare_inputs(inputs)
+
+                outputs = self.model(**inputs)
+
+                preds = outputs.probe_logits.argmax(dim=-1)
+                labels = outputs.probe_labels
+
+                preds = preds.reshape(-1)
+                labels = labels.reshape(-1)
+
+                mask = labels != -100
+
+                preds = preds[mask]
+                labels = labels[mask]
+
+                all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
+
+        all_preds = torch.cat(all_preds).numpy()
+        all_labels = torch.cat(all_labels).numpy()
+
+        accuracy = accuracy_score(all_labels, all_preds)
+
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels,
+            all_preds,
+            average="macro",
+            zero_division=0,
+        )
+
+        cm = confusion_matrix(all_labels, all_preds)
+
+        print("\n========== Probe ==========")
+        print(f"Accuracy : {accuracy:.4f}")
+        print(f"Precision: {precision:.4f}")
+        print(f"Recall   : {recall:.4f}")
+        print(f"F1       : {f1:.4f}")
+        print(cm)
+        print("===========================\n")
+
+        return {
+            "probe_accuracy": accuracy,
+            "probe_precision": precision,
+            "probe_recall": recall,
+            "probe_f1": f1,
+        }
+    
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+)
+
+def compute_probe_metrics(eval_pred):
+    logits, labels = eval_pred
+
+    predictions = logits.argmax(axis=-1)
+
+    accuracy = accuracy_score(labels, predictions)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels,
+        predictions,
+        average="macro"
+    )
+
+    return {
+        "probe_accuracy": accuracy,
+        "probe_precision": precision,
+        "probe_recall": recall,
+        "probe_f1": f1,
+    }
