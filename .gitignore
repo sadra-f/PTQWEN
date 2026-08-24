@@ -2,3 +2,7 @@ __pycache__/
 .venv/
 venv/
 model_cache/
+PTQWEN_all_tuned/
+checkpoints_full_mod_finetune/
+checkpoints_probe/
+tmp.py
