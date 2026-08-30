@@ -32,6 +32,10 @@ class PT:
     def has_representation(self):
         return self.representation is not None
 
+    @property
+    def entire_def_indices(self):
+        return [i for i in range(self.cue_index, self.def_end_index+1, 1)]
+    
     def __eq__(self, value):
         if isinstance(value, PT):
             return self.id == value.id and \

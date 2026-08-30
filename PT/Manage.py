@@ -104,3 +104,25 @@ class ManagePT:
                     res_bias[pto.batch_index, :, :, seq_index] = att_weights * -self.redist_multiplier
                     res_bias[pto.batch_index, :, :, pto.ref_seq_start_index:pto.def_end_index] = (att_weights * self.redist_multiplier).unsqueeze(-1)
         return res_bias
+
+    def repr_missing(self):
+        res = []
+        self.pts:list
+        b_pts:dict
+        pt_meta: PT
+        for bi, b_pts in enumerate(self.pts):
+            res.append({})
+            for pt_id, pt_meta in b_pts.items():
+                if not pt_meta.has_representation:
+                    res[bi][pt_id] = pt_meta.entire_def_indices
+        return res
+
+    def set_pt_repr(self, batch_index, pointer_id, value):
+        assert batch_index <= len(self.pts) and pointer_id in self.pts[batch_index].keys()
+        self.pts[batch_index][pointer_id].representation = value
+
+    def flush_representations(self):
+        for pts_dict in self.pts:
+            for k, v in pts_dict.items():
+                v.representation = None
+            

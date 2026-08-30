@@ -44,6 +44,51 @@ class PointerProbeOutput(ModelOutput):
     attentions: tuple = None
     past_key_values: Cache = None
 
+
+class ImplicitMultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads, device, dropout_rate=0.1):
+        if d_model % num_heads != 0:
+            #Decided not to handle this which would lead to a messy code!
+            raise ValueError(f"model dimension({d_model}) not divisble by requsted number of attention heads ({num_heads})!")
+        super().__init__()
+        self.device = device
+        self._d_model = d_model
+        self._num_heads = num_heads
+        self._d_att = d_model // num_heads
+        self._att_scale = torch.sqrt(torch.tensor(self._d_att, device=self.device, dtype=torch.bfloat16))
+        self._linear_proj = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
+        # self.q_w = nn.Linear(d_model, d_model)
+        self._learned_query = nn.Parameter(torch.empty(d_model, device=self.device, dtype=torch.bfloat16))
+        nn.init.normal_(self._learned_query, mean=0.0, std=0.02)
+        self.k_w = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
+        self.v_w = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
+        self._att_dropout = nn.Dropout(dropout_rate)
+        self._linear_out = nn.Linear(d_model, d_model, device=self.device)
+        # so add layers to do actual attention pooling.
+
+    def forward(self, x, mask):
+        _org_batch, _pts, _seq, _dim = x.shape
+        _batch = _org_batch * _pts
+        x = x.reshape(_batch, _seq, _dim) # from (_org_batch, pointer_count, subseq_len, hidden_d) to (_batch, subseq_len, hidden_d) where (every pointer/batch combo becomes a batch)
+
+        x = self._linear_proj(x) # (_batch, _seq, _dim)
+        # Q = self.q_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
+        Q = self._learned_query.unsqueeze(0).unsqueeze(0).expand(_batch, 1, _dim).reshape(_batch, 1, self._num_heads, self._d_att).transpose(1, 2)
+        K = self.k_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
+        V = self.v_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
+        QKt = torch.matmul(Q, K.transpose(-2, -1)) / self._att_scale # (_batch, num_heads, _seq, _seq)
+        mask = mask.reshape(_batch, 1, 1, _seq)
+        QKt.masked_fill_(mask == 0, -1e10)
+        att_weights = torch.softmax(QKt, dim=-1)
+        att_weights = self._att_dropout(att_weights) # removed if training since droupout checks it.
+        pre_x = torch.matmul(att_weights, V) # (_batch, num_heads, _seq, d_att)
+        x = pre_x.transpose(1, 2).reshape(_batch, 1, _dim) # from (_batch, num_heads, _seq, d_att) to (_batch, _seq, num_heads, d_att) to (_batch, _seq, _dim)
+        x = x.reshape(_org_batch, _pts, 1, _dim)
+        x = self._linear_out(x)
+        
+        return x, att_weights
+
+
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -177,10 +222,10 @@ def eager_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor | None,
     scaling: float,
-    # ================================================================ #
-    pt_manager:ManagePT,
-    calc_pt_bias:bool,
-    # ================================================================ #
+    # # ================================================================ #
+    # pt_manager:ManagePT,
+    # calc_pt_bias:bool,
+    # # ================================================================ #
     dropout: float = 0.0,
     **kwargs: Unpack[TransformersKwargs],
 ):
@@ -192,11 +237,11 @@ def eager_attention_forward(
         attn_weights = attn_weights + attention_mask
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    # ================================================================ #
-    if calc_pt_bias:
-        pointer_bias = pt_manager.calculate_bias(attn_weights).to(attn_weights.device)
-        attn_weights = attn_weights + pointer_bias
-    # ================================================================ #
+    # # ================================================================ #
+    # if calc_pt_bias:
+    #     pointer_bias = pt_manager.calculate_bias(attn_weights).to(attn_weights.device)
+    #     attn_weights = attn_weights + pointer_bias
+    # # ================================================================ #
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -225,7 +270,7 @@ class Qwen2Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
         # ================================================================ #
-        self.calc_pt_bias = any([p.requires_grad for p in self.parameters()])
+        self.do_replace_pt_value = any([p.requires_grad for p in self.parameters()])
         self.pt_manager_ref = pt_manager
         # ================================================================ #
 
@@ -240,9 +285,18 @@ class Qwen2Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
+        # ================================================================ #
+        replaced_hidden_states = hidden_states.clone()
+        if self.do_replace_pt_value:
+            for bi, b_pts in enumerate(self.pt_manager_ref.pts):
+                for pointer_id, pointer_obj in b_pts.items():
+                    if len(pointer_obj.use_indecies) == 0:
+                        continue
+                    replaced_hidden_states[bi, list(pointer_obj.use_indecies)] = pointer_obj.representation
+        # ================================================================ #
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(replaced_hidden_states).view(hidden_shape).transpose(1, 2) #TODO: modify it here :D
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -265,7 +319,7 @@ class Qwen2Attention(nn.Module):
             sliding_window=self.sliding_window,  # main diff with Llama
             # ================================================================ #
             pt_manager=self.pt_manager_ref,
-            calc_pt_bias=self.calc_pt_bias,
+            calc_pt_bias=self.do_replace_pt_value,
             # ================================================================ #
             **kwargs,
         )
@@ -274,8 +328,8 @@ class Qwen2Attention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
     
-    def check_calc_pt_bias(self):
-        self.calc_pt_bias = any([p.requires_grad for p in self.parameters()])
+    def check_replace_pt_value(self):
+        self.do_replace_pt_value = any([p.requires_grad for p in self.parameters()])
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -390,7 +444,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
         # # ================================================================ #
+        self.pooler = ImplicitMultiHeadAttention(self.config.hidden_size, self.config.num_attention_heads, 'cpu', 0)
         # self.set_freeze_half_status(False)
+        self._hidden_state_mem = None
         # # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
@@ -415,7 +471,36 @@ class Qwen2Model(Qwen2PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
         # ================================================================ #
-        self.pt_manager.extract_PTs(input_ids)
+        if past_key_values is None or self._hidden_state_mem is None:
+            self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
+        if past_key_values is not None:
+            if not past_key_values.is_initialized:
+                self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
+        # ================================================================ #
+        # ================================================================ #
+        def _update_pt_representations(l):
+            self.pt_manager.extract_PTs(input_ids)
+            missing_representations = self.pt_manager.repr_missing()
+            _max_pt_count = max(len(x) for x in missing_representations)
+
+            _max_subseq_len = max(
+                len(rng)
+                for batch in missing_representations
+                for rng in batch.values()
+            )
+            pooling_inp = torch.zeros((input_ids.shape[0], _max_pt_count, _max_subseq_len, self.config.hidden_size), device=self.device, dtype=torch.bfloat16)
+            mask = torch.zeros((input_ids.shape[0], _max_pt_count, _max_subseq_len), device=self.device, dtype=torch.bfloat16)
+            _pt_map = [{} for _ in range(input_ids.shape[0])]
+            for bi, b_missing in enumerate(missing_representations):
+                for i, (pt_id, _range) in enumerate(b_missing.items()):
+                    _pt_map[bi][pt_id] = i
+                    pooling_inp[bi, i, list(range(len(_range)))] = self._hidden_state_mem[l][bi, _range]
+                    mask[bi, i, list(range(len(_range)))] = 1
+            pooled_representations = self.pooler(pooling_inp, mask)[0]
+            for bi in range(input_ids.shape[0]):
+                for pt_id, mapping in _pt_map[bi].items():
+                    self.pt_manager.pts[bi][pt_id].representation = pooled_representations[bi, mapping].unsqueeze(0)
+        
         # ================================================================ #
 
         if inputs_embeds is None:
@@ -451,6 +536,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+            self._hidden_state_mem[i] = torch.cat([self._hidden_state_mem[i], hidden_states], dim=1).to(hidden_states.device).to(torch.bfloat16)
+            _update_pt_representations(i)
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[self.config.layer_types[i]],
@@ -460,19 +547,26 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 use_cache=use_cache,
                 **kwargs,
             )
+            self.pt_manager.flush_representations()
 
         hidden_states = self.norm(hidden_states)
+        # self._hidden_state_mem = torch.cat([self._hidden_state_mem, hidden_states], dim=1).to(hidden_states.device)
+        # _update_pt_representations()
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
 
-    def set_req_grad_half(self, set_to=False):
-        for i, l in enumerate(self.layers):
-            if i % 2 == 0:
-                for p in l.parameters():
-                    p.requires_grad = set_to
-                l.self_attn.check_calc_pt_bias()
+    def set_req_gard_new_module(self, set_to=True):
+        for p in self.pooler.parameters():
+            p.requires_grad = set_to
+
+    def set_req_grad_second_half(self, set_to=True):
+        half_point = len(self.layers) // 2
+        for _, l in enumerate(self.layers[half_point:]):
+            for p in l.parameters():
+                p.requires_grad = set_to
+            l.self_attn.check_replace_pt_value()
 
 @auto_docstring
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
@@ -486,16 +580,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self._pt_ids_sorted = pt_ids_sorted
-        # ================================================================ #
-        self.linear_probe = nn.Linear(
-            config.hidden_size,
-            len(pt_ids_sorted) + 1,
-            bias=False
-        )
-        self._pt_to_class  = {
-            token: i + 1 for i, token in enumerate(self._pt_ids_sorted)
-        }
-        # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -544,48 +628,20 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
-        # ================================================================ #
-        probe_labels = torch.full_like(input_ids, -100)
-
-        for token_id, cls in self._pt_to_class.items():
-            probe_labels[input_ids == token_id] = cls
-        detached_hidden_state = hidden_states.detach()
-        probe_logits = self.linear_probe(detached_hidden_state)
-        # ================================================================ #
-
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
-            probe_loss = F.cross_entropy(
-                probe_logits.view(-1, probe_logits.size(-1)),
-                probe_labels.view(-1),
-                ignore_index=-100
-            )
 
         return PointerProbeOutput(
-            loss=probe_loss,
-            logits=probe_logits,
-            
-            lm_loss=loss,
-            lm_logits=logits,
-            
-            probe_loss=probe_loss,
-            probe_logits=probe_logits,
-            probe_labels=probe_labels,
+            loss=loss,
+            logits=logits,
 
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             past_key_values=outputs.past_key_values,
         )
-    
-    def freeze_pretrained_model(self):
-        for param in self.model.parameters():
-            param.requires_grad = False
-        for param in self.lm_head.parameters():
-            param.requires_grad = False
-        for param in self.linear_probe.parameters():
-            param.requires_grad = True
+
 
 
 class Qwen2ForSequenceClassification(GenericForSequenceClassification, Qwen2PreTrainedModel):
