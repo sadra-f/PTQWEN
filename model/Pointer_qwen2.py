@@ -45,49 +45,6 @@ class PointerProbeOutput(ModelOutput):
     past_key_values: Cache = None
 
 
-class ImplicitMultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads, device, dropout_rate=0.1):
-        if d_model % num_heads != 0:
-            #Decided not to handle this which would lead to a messy code!
-            raise ValueError(f"model dimension({d_model}) not divisble by requsted number of attention heads ({num_heads})!")
-        super().__init__()
-        self.device = device
-        self._d_model = d_model
-        self._num_heads = num_heads
-        self._d_att = d_model // num_heads
-        self._att_scale = torch.sqrt(torch.tensor(self._d_att, device=self.device, dtype=torch.bfloat16))
-        self._linear_proj = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
-        # self.q_w = nn.Linear(d_model, d_model)
-        self._learned_query = nn.Parameter(torch.empty(d_model, device=self.device, dtype=torch.bfloat16))
-        nn.init.normal_(self._learned_query, mean=0.0, std=0.02)
-        self.k_w = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
-        self.v_w = nn.Linear(d_model, d_model, device=self.device, dtype=torch.bfloat16)
-        self._att_dropout = nn.Dropout(dropout_rate)
-        self._linear_out = nn.Linear(d_model, d_model, device=self.device)
-        # so add layers to do actual attention pooling.
-
-    def forward(self, x, mask):
-        _org_batch, _pts, _seq, _dim = x.shape
-        _batch = _org_batch * _pts
-        x = x.reshape(_batch, _seq, _dim) # from (_org_batch, pointer_count, subseq_len, hidden_d) to (_batch, subseq_len, hidden_d) where (every pointer/batch combo becomes a batch)
-
-        x = self._linear_proj(x) # (_batch, _seq, _dim)
-        # Q = self.q_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
-        Q = self._learned_query.unsqueeze(0).unsqueeze(0).expand(_batch, 1, _dim).reshape(_batch, 1, self._num_heads, self._d_att).transpose(1, 2)
-        K = self.k_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
-        V = self.v_w(x).reshape(_batch, _seq, self._num_heads, -1).transpose(2,1) # from (_batch, _seq, _dim) to (_batch, _seq, num_heads, d_att) to (_batch, num_heads, _seq, d_att)
-        QKt = torch.matmul(Q, K.transpose(-2, -1)) / self._att_scale # (_batch, num_heads, _seq, _seq)
-        mask = mask.reshape(_batch, 1, 1, _seq)
-        QKt.masked_fill_(mask == 0, -1e10)
-        att_weights = torch.softmax(QKt, dim=-1)
-        att_weights = self._att_dropout(att_weights) # removed if training since droupout checks it.
-        pre_x = torch.matmul(att_weights, V) # (_batch, num_heads, _seq, d_att)
-        x = pre_x.transpose(1, 2).reshape(_batch, 1, _dim) # from (_batch, num_heads, _seq, d_att) to (_batch, _seq, num_heads, d_att) to (_batch, _seq, _dim)
-        x = x.reshape(_org_batch, _pts, 1, _dim)
-        x = self._linear_out(x)
-        
-        return x, att_weights
-
 
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
@@ -270,7 +227,10 @@ class Qwen2Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
         # ================================================================ #
-        self.do_replace_pt_value = any([p.requires_grad for p in self.parameters()])
+        self.do_replace_pt_value = None
+        self.pt_att = nn.MultiheadAttention(config.hidden_size, config.num_attention_heads, config.attention_dropout)
+        self.pt_att_query = nn.Parameter(torch.empty(1, self.config.hidden_size))
+        nn.init.normal_(self.pt_att_query, mean=0.0, std=0.02)
         self.pt_manager_ref = pt_manager
         # ================================================================ #
 
@@ -285,24 +245,35 @@ class Qwen2Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        # ================================================================ #
-        replaced_hidden_states = hidden_states.clone()
-        if self.do_replace_pt_value:
-            for bi, b_pts in enumerate(self.pt_manager_ref.pts):
-                for pointer_id, pointer_obj in b_pts.items():
-                    if len(pointer_obj.use_indecies) == 0:
-                        continue
-                    replaced_hidden_states[bi, list(pointer_obj.use_indecies)] = pointer_obj.representation
-        # ================================================================ #
+        assert not self.pt_att_query.isnan().any(), "nans in learned query!!"
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(replaced_hidden_states).view(hidden_shape).transpose(1, 2) #TODO: modify it here :D
-
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2) 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+        # ================================================================ #
+        replaced_value_states = value_states.clone()
+        if self.do_replace_pt_value:
+            for bi, pt_dict in enumerate(self.pt_manager_ref.pts):
+                for pt_id, pt_obj in pt_dict.items():
+                    if past_key_values is not None:
+                        if not past_key_values.layers[self.layer_idx].is_initialized:
+                            pt_obj.reset_req_hidden_states(self.layer_idx)
+                            pt_obj.set_req_hidden_states(self.layer_idx, hidden_states[bi, pt_obj.entire_def_indices].clone().detach())
+                        elif pt_obj.get_req_hidden_states(self.layer_idx) is None:
+                            pt_obj.set_req_hidden_states(self.layer_idx, hidden_states[bi, pt_obj.entire_def_indices].clone().detach())
+                    else:
+                        pt_obj.reset_req_hidden_states(self.layer_idx)
+                        pt_obj.set_req_hidden_states(self.layer_idx, hidden_states[bi, pt_obj.entire_def_indices].clone().detach())
+                    if pt_obj.is_used:
+                        _repl = self.pt_att(self.pt_att_query.to(hidden_states.device), pt_obj.get_req_hidden_states(self.layer_idx) , pt_obj.get_req_hidden_states(self.layer_idx))[0]
+                        _projected_repl = self.v_proj(_repl).view((hidden_shape[0], 1, -1, hidden_shape[-1])).transpose(1,2)
+                        projected_pool = _projected_repl.expand(-1, -1, len(pt_obj.use_indices), -1)
+                        replaced_value_states[pt_obj.batch_index, :, pt_obj.use_indices, :] = projected_pool.squeeze(0)
+        # ================================================================ #
 
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
@@ -312,7 +283,7 @@ class Qwen2Attention(nn.Module):
             self,
             query_states,
             key_states,
-            value_states,
+            replaced_value_states,
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
@@ -331,6 +302,9 @@ class Qwen2Attention(nn.Module):
     def check_replace_pt_value(self):
         self.do_replace_pt_value = any([p.requires_grad for p in self.parameters()])
 
+    def _reinit_pt_query(self):
+        self.pt_att_query = nn.Parameter(torch.empty(1, self.config.hidden_size, dtype=torch.bfloat16))
+        nn.init.normal_(self.pt_att_query, mean=0.0, std=0.02)
 
 @use_kernel_forward_from_hub("RMSNorm")
 class Qwen2RMSNorm(nn.Module):
@@ -443,11 +417,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.rotary_emb = Qwen2RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
-        # # ================================================================ #
-        self.pooler = ImplicitMultiHeadAttention(self.config.hidden_size, self.config.num_attention_heads, 'cpu', 0)
-        # self.set_freeze_half_status(False)
-        self._hidden_state_mem = None
-        # # ================================================================ #
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -467,42 +436,17 @@ class Qwen2Model(Qwen2PreTrainedModel):
     ) -> BaseModelOutputWithPast:
         # ================================================================ #
         assert input_ids is not None and inputs_embeds is None, "PointerQwen requires input_ids as input to manage pointers!"
+        self.pt_manager.extract_PTs(input_ids)
         # ================================================================ #
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
         # ================================================================ #
-        if past_key_values is None or self._hidden_state_mem is None:
-            self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
-        if past_key_values is not None:
-            if not past_key_values.is_initialized:
-                self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
+#        if past_key_values is None or self._hidden_state_mem is None:
+#            self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
+#        if past_key_values is not None:
+#            if not past_key_values.is_initialized:
+#                self._hidden_state_mem = [torch.zeros((input_ids.shape[0], 0, self.config.hidden_size), device=self.device) for _ in range(self.config.num_hidden_layers)]
         # ================================================================ #
-        # ================================================================ #
-        def _update_pt_representations(l):
-            self.pt_manager.extract_PTs(input_ids)
-            missing_representations = self.pt_manager.repr_missing()
-            _max_pt_count = max(len(x) for x in missing_representations)
-
-            _max_subseq_len = max(
-                len(rng)
-                for batch in missing_representations
-                for rng in batch.values()
-            )
-            pooling_inp = torch.zeros((input_ids.shape[0], _max_pt_count, _max_subseq_len, self.config.hidden_size), device=self.device, dtype=torch.bfloat16)
-            mask = torch.zeros((input_ids.shape[0], _max_pt_count, _max_subseq_len), device=self.device, dtype=torch.bfloat16)
-            _pt_map = [{} for _ in range(input_ids.shape[0])]
-            for bi, b_missing in enumerate(missing_representations):
-                for i, (pt_id, _range) in enumerate(b_missing.items()):
-                    _pt_map[bi][pt_id] = i
-                    pooling_inp[bi, i, list(range(len(_range)))] = self._hidden_state_mem[l][bi, _range]
-                    mask[bi, i, list(range(len(_range)))] = 1
-            pooled_representations = self.pooler(pooling_inp, mask)[0]
-            for bi in range(input_ids.shape[0]):
-                for pt_id, mapping in _pt_map[bi].items():
-                    self.pt_manager.pts[bi][pt_id].representation = pooled_representations[bi, mapping].unsqueeze(0)
-        
-        # ================================================================ #
-
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
@@ -536,8 +480,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-            self._hidden_state_mem[i] = torch.cat([self._hidden_state_mem[i], hidden_states], dim=1).to(hidden_states.device).to(torch.bfloat16)
-            _update_pt_representations(i)
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[self.config.layer_types[i]],
@@ -547,26 +489,38 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 use_cache=use_cache,
                 **kwargs,
             )
-            self.pt_manager.flush_representations()
-
         hidden_states = self.norm(hidden_states)
-        # self._hidden_state_mem = torch.cat([self._hidden_state_mem, hidden_states], dim=1).to(hidden_states.device)
-        # _update_pt_representations()
+#        self.pt_manager.extract_PTs(input_ids)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
 
-    def set_req_gard_new_module(self, set_to=True):
-        for p in self.pooler.parameters():
-            p.requires_grad = set_to
-
     def set_req_grad_second_half(self, set_to=True):
-        half_point = len(self.layers) // 2
+        half_point = (len(self.layers) // 2) + 4
         for _, l in enumerate(self.layers[half_point:]):
             for p in l.parameters():
                 p.requires_grad = set_to
-            l.self_attn.check_replace_pt_value()
+
+    def set_req_grad_first_half(self, set_to=False):
+        half_point = (len(self.layers) // 2) + 4
+        for _, l in enumerate(self.layers[:half_point]):
+            for p in l.parameters():
+                p.requires_grad = set_to
+
+    def set_do_replace_pt_value_second_half(self, set_to=True):
+        half_point = (len(self.layers) // 2) + 4
+        for _, l in enumerate(self.layers[:half_point]):
+            l.self_attn.do_replace_pt_value = set_to
+
+    def set_do_replace_pt_value_first_half(self, set_to=False):
+        half_point = (len(self.layers) // 2) + 4
+        for _, l in enumerate(self.layers[half_point:]):
+            l.self_attn.do_replace_pt_value = set_to
+
+    def re_init_pt_queries(self):
+        for l in self.layers:
+            l.self_attn._reinit_pt_query()
 
 @auto_docstring
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
@@ -642,7 +596,76 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
         )
 
+class SequentialQwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+    _tp_plan = {"lm_head": "colwise_gather_output"}
+    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
+    def __init__(self, config, pt_ids_sorted):
+        super().__init__(config)
+        self.model = Qwen2Model(config, pt_ids_sorted)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self._pt_ids_sorted = pt_ids_sorted
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
+        **kwargs: Unpack[TransformersKwargs],
+        ):
+
+        seq_len = input_ids.shape[1]
+
+        total_loss = 0.0
+        # past_key_values = None
+        self.model.pt_manager.hard_reset()
+        for t in range(seq_len - 1):
+
+            # Everything up to and including t
+            current_input = input_ids[:, t:t+1]
+            current_pos_id = None if position_ids is None else position_ids[:, t:t+1]
+            outputs: BaseModelOutputWithPast = self.model(
+                input_ids=current_input,
+                attention_mask=attention_mask[:, t:t+1],
+                position_ids=current_pos_id,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+            hidden_states = outputs.last_hidden_state
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
+            # loss = None
+            # if labels is not None:
+            #     loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+            past_key_values = outputs.past_key_values
+
+            target = labels[:, t + 1]
+            if labels is not None:
+                loss_t = nn.functional.cross_entropy(logits, target, ignore_index=-100)
+
+                total_loss = total_loss + loss_t
+
+        if labels is not None:
+            total_loss = total_loss / (seq_len - 1)
+
+        return {
+            "loss": total_loss,
+            "logits": logits.unsqueeze(1),
+        }
 
 class Qwen2ForSequenceClassification(GenericForSequenceClassification, Qwen2PreTrainedModel):
     pass
@@ -665,3 +688,4 @@ __all__ = [
     "Qwen2ForTokenClassification",
     "Qwen2ForQuestionAnswering",
 ]
+

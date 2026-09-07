@@ -9,7 +9,7 @@ class ManagePT:
         self.all_pt_ids = sorted(self.all_pt_ids)
         self.cue_id = cue_id
         self.pt_ids = pt_ids
-        self.pts = None
+        self.pts = []
         self.redist_multiplier = redist_multiplier
         self.last_seen_index = -1
         self.prev_id = None
@@ -25,7 +25,7 @@ class ManagePT:
                     if self.prev_id[bi] == self.cue_id:
                         print(f"Definition for PT {curr_id} Seen at batch {bi} and index {curr_index} But was previously defined. Skipping addition.")
                     else:
-                        self.pts[bi][int(curr_id)].use_indecies.add(curr_index)
+                        self.pts[bi][int(curr_id)]._use_indices.add(curr_index)
                 elif self.prev_id[bi] == self.cue_id:
                     self._add_pt(bi, curr_id, cue_index=self.prev_ri[bi], def_end_index=curr_index)
                 else:
@@ -63,7 +63,7 @@ class ManagePT:
             curr_id = int(batched_seq[bi,ri])
             if curr_id in self.pt_ids:
                 if self._pt_exist(bi, curr_id):
-                    self.pts[bi][curr_id].use_indecies.add(ri)
+                    self.pts[bi][curr_id]._use_indices.add(ri)
                 elif self.prev_id[bi] == self.cue_id:
                     self._add_pt(bi, curr_id, cue_index=self.prev_ri[bi], def_end_index=ri)
                 else:
@@ -99,13 +99,15 @@ class ManagePT:
         # bpts => batch_PTs
         for bpts in self.pts:
             for pt_tkn_id, pto in bpts.items():
-                for seq_index in pto.use_indecies:
+                for seq_index in pto._use_indices:
                     att_weights = batched_att_weights[pto.batch_index, :, :, seq_index]
                     res_bias[pto.batch_index, :, :, seq_index] = att_weights * -self.redist_multiplier
                     res_bias[pto.batch_index, :, :, pto.ref_seq_start_index:pto.def_end_index] = (att_weights * self.redist_multiplier).unsqueeze(-1)
         return res_bias
 
     def repr_missing(self):
+        if max(self.pts, key=lambda x: len(x)) == 0:
+            return None
         res = []
         self.pts:list
         b_pts:dict
@@ -126,3 +128,8 @@ class ManagePT:
             for k, v in pts_dict.items():
                 v.representation = None
             
+    def hard_reset(self):
+        self.pts = []
+        self.last_seen_index = -1
+        self.prev_id = None
+        self.prev_ri = None

@@ -1,5 +1,5 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer
-from model.Pointer_qwen2 import Qwen2ForCausalLM
+from model.Pointer_qwen2 import Qwen2ForCausalLM, SequentialQwen2ForCausalLM
 from utils.preprocess import preprocess_file
 from utils.MTrainer import MyTrainer
 from utils.Testcallback import TestCallback
@@ -39,8 +39,16 @@ def main():
 
     model.to(device)
     model.resize_token_embeddings(len(tokenizer))
-    model.model.set_req_gard_new_module()
     model.model.set_req_grad_second_half()
+    model.model.set_req_grad_first_half()
+    model.model.set_do_replace_pt_value_second_half()
+    model.model.set_do_replace_pt_value_first_half()
+    model.model.re_init_pt_queries()
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print(name, p.numel(), p.dtype)
+    # model.eval()
+    # model.generate(torch.tensor(tokenizer("hello my lads")["input_ids"]).unsqueeze(0))
     # model.model.set_req_grad_half(False) # unfreezes half of the model parameters and turns on PT affect.
     # model.freeze_pretrained_model()# freezes the pretrained model parameters and only allows the linear probe to be trained. doesn't turn on PT affect.
 
@@ -54,9 +62,9 @@ def main():
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         eval_strategy="steps",
-        eval_steps=250,
+        eval_steps=3,
         save_strategy="epoch",
         save_steps=3,
         save_total_limit=1,
@@ -67,6 +75,12 @@ def main():
         seed=24,
     )
     # callback = TestCallback(test_ds, test_raw, tokenizer)
+    model = SequentialQwen2ForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-1.5B", 
+        sorted(all_pt_ids), 
+        attn_implementation="eager", 
+        cache_dir="model_cache/"
+    )
     trainer = MyTrainer(
         model=model,
         args=args,

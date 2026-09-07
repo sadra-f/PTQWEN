@@ -11,7 +11,7 @@ class MyTrainer(Trainer):
                 print(name)
                 continue
 
-            if name.startswith("model.pooler"):
+            if "self_attn.pt_att." in name:
                 new_module_params.append(param)
             else:
                 decoder_params.append(param)
@@ -24,7 +24,7 @@ class MyTrainer(Trainer):
                 },
                 {
                     "params": new_module_params,
-                    "lr": 1e-3,
+                    "lr": 2e-4,
                 },
             ],
             weight_decay=self.args.weight_decay,
